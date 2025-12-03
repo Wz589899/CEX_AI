@@ -1,2 +1,2 @@
-# -
-基于Deepseek-chat和Tampermonkey的学习通网页版随堂练习和考试的自动答题
+# 学习通自动答题
+基于Deepseek-chat和Tampermonkey的超星学习通网页版随堂练习和考试的自动答题
