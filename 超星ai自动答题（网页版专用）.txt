@@ -1,8 +1,9 @@
 // ==UserScript==
 // @name         超星学习通全能答题助手
+// @supportURL   https://github.com/NaiZi899/CEX_AI
 // @namespace    http://tampermonkey.net/
-// @version      2.6
-// @description  v2.6: 移除冗余日志，单一方法失败自动静默切换，仅报告最终结果，支持考试/作业全场景
+// @version      2.7
+// @description  v2.7: 移除结束弹窗，保持静默运行；支持作业/考试/预习全场景；增强填空题写入能力
 // @author       YourName
 // @match        *://mooc1.chaoxing.com/mooc-ans/work/*
 // @match        *://mooc1-api.chaoxing.com/mooc-ans/work/*
@@ -23,17 +24,18 @@
     let isRunning = false;
     let stopSignal = false;
 
+    // 默认配置
     const DEFAULT_CONFIG = {
         baseUrl: "https://api.deepseek.com/chat/completions",
         apiKey: "",
         model: "deepseek-chat"
     };
 
-    // --- 核心写入逻辑 (静默容错版) ---
+    // --- 核心写入逻辑 ---
     function fillAnswer(id, type, ans) {
         const container = document.querySelector(`.questionLi[data="${id}"]`);
         if (!container) {
-            log(`❌ 答题失败: 未找到题目容器`, "log-err");
+            log(`❌ 失败: 未找到题目容器`, "log-err");
             return;
         }
 
@@ -57,20 +59,20 @@
                 });
 
                 if (clickCount > 0 || clean.length > 0) {
-                    log(`✅ 成功: 已选 ${clean}`, "log-ok");
+                    log(`✅ 已选: ${clean}`, "log-ok");
                 } else {
-                    throw new Error("找不到对应选项");
+                    throw new Error("找不到选项");
                 }
             } catch (e) {
-                log(`❌ 答题失败: ${e.message}`, "log-err");
+                log(`❌ 失败: ${e.message}`, "log-err");
             }
         }
-        // 2. 填空题/简答题 (链式尝试)
+        // 2. 填空题/简答题 (UEditor)
         else {
             const ueId = `answerEditor${id}1`;
-            let finalError = "";
+            let success = false;
 
-            // === 方案 A: 原生 UE API (首选) ===
+            // 方案A: 原生API
             try {
                 const pageUE = unsafeWindow.UE;
                 if (pageUE && pageUE.getEditor) {
@@ -83,42 +85,46 @@
                                 editor.fireEvent('contentchange');
                             }
                         });
-                        log(`✅ 成功: 已写入 "${ans.substring(0, 10)}..."`, "log-ok");
-                        triggerSave(id);
-                        return; // 成功则直接退出
+                        success = true;
+                        log(`✅ 写入成功 (API)`, "log-ok");
                     }
                 }
-            } catch (e) { finalError = "API调用失败"; }
+            } catch (e) {}
 
-            // === 方案 B: Iframe 暴力注入 (备选) ===
-            try {
-                const textarea = document.getElementById(ueId);
-                const iframe = textarea ? textarea.parentNode.querySelector('iframe') : null;
-                if (iframe && iframe.contentWindow) {
-                    const doc = iframe.contentWindow.document;
-                    doc.body.innerHTML = `<p>${ans}</p>`;
-                    doc.body.dispatchEvent(new Event('input', {bubbles: true}));
-                    doc.body.dispatchEvent(new Event('blur', {bubbles: true}));
-                    log(`✅ 成功: 已写入 "${ans.substring(0, 10)}..."`, "log-ok");
-                    triggerSave(id);
-                    return; // 成功则直接退出
-                }
-            } catch (e) { finalError = "DOM注入失败"; }
+            // 方案B: Iframe注入
+            if (!success) {
+                try {
+                    const textarea = document.getElementById(ueId);
+                    const iframe = textarea ? textarea.parentNode.querySelector('iframe') : null;
+                    if (iframe && iframe.contentWindow) {
+                        const doc = iframe.contentWindow.document;
+                        doc.body.innerHTML = `<p>${ans}</p>`;
+                        doc.body.dispatchEvent(new Event('input', {bubbles: true}));
+                        doc.body.dispatchEvent(new Event('blur', {bubbles: true}));
+                        success = true;
+                        log(`✅ 写入成功 (Iframe)`, "log-ok");
+                    }
+                } catch (e) {}
+            }
 
-            // === 方案 C: Textarea 降级 (兜底) ===
-            try {
-                const textarea = document.getElementById(ueId);
-                if (textarea) {
-                    textarea.value = ans;
-                    textarea.dispatchEvent(new Event('input', { bubbles: true }));
-                    log(`✅ 成功: 已写入隐藏域`, "log-ok");
-                    triggerSave(id);
-                    return;
-                }
-            } catch(e) { finalError = "找不到输入框"; }
+            // 方案C: Textarea
+            if (!success) {
+                try {
+                    const textarea = document.getElementById(ueId);
+                    if (textarea) {
+                        textarea.value = ans;
+                        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+                        success = true;
+                        log(`✅ 写入成功 (隐藏域)`, "log-ok");
+                    }
+                } catch(e) {}
+            }
 
-            // === 全部失败 ===
-            log(`❌ 答题失败: 无法写入 (${finalError})`, "log-err");
+            if (success) {
+                triggerSave(id);
+            } else {
+                log(`❌ 写入失败: 无法定位编辑器`, "log-err");
+            }
         }
     }
 
@@ -129,15 +135,15 @@
         }, 500);
     }
 
-    // --- UI (精简版) ---
+    // --- UI ---
     function createGUI() {
         if (document.getElementById('cx-ai-gui')) return;
         const div = document.createElement('div');
         div.id = 'cx-ai-gui';
-        div.style.cssText = "position:fixed; top:20px; right:20px; width:280px; background:#fff; border-radius:6px; box-shadow:0 2px 10px rgba(0,0,0,0.2); z-index:999999; font-size:13px; font-family: sans-serif;";
+        div.style.cssText = "position:fixed; top:20px; right:20px; width:280px; background:#fff; border-radius:6px; box-shadow:0 2px 10px rgba(0,0,0,0.2); z-index:999999; font-size:13px; font-family: sans-serif; border: 1px solid #e0e0e0;";
         div.innerHTML = `
             <div style="background:#333; color:#fff; padding:8px 12px; border-radius:6px 6px 0 0; display:flex; justify-content:space-between; align-items:center; cursor:move;">
-                <span>答题助手</span>
+                <span>🤖 答题助手 v2.7</span>
                 <span onclick="this.parentNode.parentNode.style.display='none'" style="cursor:pointer; font-size:14px;">✕</span>
             </div>
             <div style="padding:12px; display:flex; flex-direction:column; gap:8px;">
@@ -145,8 +151,8 @@
                 <input type="password" id="cx-key" value="${localStorage.getItem('cx_key') || DEFAULT_CONFIG.apiKey}" style="padding:5px; border:1px solid #ddd; border-radius:3px;" placeholder="API Key">
                 <input type="text" id="cx-model" value="${localStorage.getItem('cx_model') || DEFAULT_CONFIG.model}" style="padding:5px; border:1px solid #ddd; border-radius:3px;" placeholder="Model">
                 <div style="display:flex; gap:8px;">
-                    <button id="cx-start" style="flex:1; padding:6px; background:#28a745; color:white; border:none; border-radius:3px; cursor:pointer;">开始</button>
-                    <button id="cx-stop" style="flex:1; padding:6px; background:#dc3545; color:white; border:none; border-radius:3px; cursor:pointer;" disabled>停止</button>
+                    <button id="cx-start" style="flex:1; padding:6px; background:#28a745; color:white; border:none; border-radius:3px; cursor:pointer; font-weight:bold;">开始运行</button>
+                    <button id="cx-stop" style="flex:1; padding:6px; background:#dc3545; color:white; border:none; border-radius:3px; cursor:pointer; font-weight:bold;" disabled>停止</button>
                 </div>
                 <div id="cx-log" style="height:120px; background:#f9f9f9; border:1px solid #eee; overflow-y:auto; padding:6px; font-family:monospace; font-size:12px; line-height:1.4;"></div>
             </div>
@@ -178,7 +184,7 @@
         document.getElementById('cx-start').disabled = false;
         document.getElementById('cx-stop').disabled = true;
         isRunning = false;
-        log("⏹ 已停止", "log-err");
+        log("⏹ 已手动停止", "log-err");
     }
 
     async function startWork() {
@@ -187,7 +193,7 @@
         stopSignal = false;
         document.getElementById('cx-start').disabled = true;
         document.getElementById('cx-stop').disabled = false;
-        document.getElementById('cx-log').innerHTML = ""; // 清空日志
+        document.getElementById('cx-log').innerHTML = "";
 
         const questions = extractQuestions();
         log(`🚀 识别到 ${questions.length} 题，开始工作...`, "log-info");
@@ -200,19 +206,20 @@
             if(el) el.scrollIntoView({behavior:"smooth", block:"center"});
 
             try {
-                // 简单的处理日志，不显示废话
                 const ans = await askAI(q);
                 fillAnswer(q.id, q.type, ans);
 
-                // 随机延迟避免被检测
-                await new Promise(r => setTimeout(r, 1500 + Math.random() * 1000));
+                // 随机延迟
+                await new Promise(r => setTimeout(r, 1000 + Math.random() * 1000));
             } catch(e) {
-                log(`❌ 第${i+1}题异常: ${e}`, "log-err");
+                log(`❌ 题${i+1}异常: ${e}`, "log-err");
             }
         }
         if (!stopSignal) {
-            stopWork();
-            alert("🎉 全部完成！请务必检查填空题内容是否正确！");
+            log("🎉 全部任务已完成", "log-ok"); // 仅日志提示，不弹窗
+            isRunning = false;
+            document.getElementById('cx-start').disabled = false;
+            document.getElementById('cx-stop').disabled = true;
         }
     }
 
@@ -250,8 +257,7 @@
     function askAI(q) {
         return new Promise((resolve, reject) => {
             const isText = q.type.includes("填空") || q.type.includes("简答");
-            // 简化提示词，提高效率
-            const prompt = `题目：${q.question}\n${q.options.length?'选项：\n'+q.options.join('\n'):''}\n\n要求：\n1.选择题/判断题只回字母。\n2.填空/简答题直接回答案内容，无废话。`;
+            const prompt = `题目：${q.question}\n${q.options.length?'选项：\n'+q.options.join('\n'):''}\n\n要求：\n1.选择题/判断题只回字母。\n2.填空/简答题直接回答案内容，不要任何解释或前缀。`;
 
             GM_xmlhttpRequest({
                 method: "POST",
